@@ -14,3 +14,10 @@ add_custom_target(
     COMMAND echo "Removed!"
     DEPENDS test
 )
+
+add_executable(path_utils_test path_utils_test.cc)
+add_custom_target(
+    run_path_utils_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/path_utils_test
+    DEPENDS path_utils_test
+)

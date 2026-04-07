@@ -19,6 +19,7 @@
 
 #include "externis.h"
 
+#include <filesystem>
 #include <stack>
 #include <string>
 #include <vector>
@@ -50,30 +51,41 @@ map_t<std::string, std::string> normalized_files_map;
 set_t<std::string> normalized_files;
 set_t<std::string> conflicted_files;
 
-void register_include_location(const char *file_name, const char *dir_name) {
-  if (!file_to_include_directory.contains(file_name)) {
+std::optional<std::string> lexically_relative_path(const std::string &file_path,
+                                                   const std::string &dir_path) {
+  auto normalized_file = std::filesystem::path(file_path).lexically_normal();
+  auto normalized_dir = std::filesystem::path(dir_path).lexically_normal();
+  auto relative = normalized_file.lexically_relative(normalized_dir);
+  if (relative.empty()) {
+    return std::nullopt;
+  }
+  return relative.generic_string();
+}
+
+bool register_include_location(const char *file_name, const char *dir_name) {
+  if (!file_to_include_directory.count(file_name)) {
     std::string file_std = file_name;
     file_to_include_directory[file_name] = dir_name;
     auto &folder_std = file_to_include_directory[file_std];
-    if (file_std.starts_with(folder_std)) {
-      // +1 for path separator.
-      auto normalized_file = file_std.substr(folder_std.size() + 1);
-      normalized_files_map[file_std] = normalized_file;
-      if (normalized_files.contains(normalized_file)) {
-        conflicted_files.insert(normalized_file);
+    auto normalized_file = lexically_relative_path(file_std, folder_std);
+    if (normalized_file && *normalized_file != ".") {
+      normalized_files_map[file_std] = *normalized_file;
+      if (normalized_files.count(*normalized_file)) {
+        conflicted_files.insert(*normalized_file);
       } else {
-        normalized_files.insert(normalized_file);
+        normalized_files.insert(*normalized_file);
       }
     } else {
       fprintf(stderr, "Externis warning: Can't normalize paths %s and %s\n",
               file_name, dir_name);
     }
   }
+  return true;
 }
 
 const char *normalized_file_name(const char *file_name) {
-  if (normalized_files_map.contains(file_name) and
-      !conflicted_files.contains(normalized_files_map[file_name])) {
+  if (normalized_files_map.count(file_name) and
+      !conflicted_files.count(normalized_files_map[file_name])) {
     return normalized_files_map[file_name].data();
   } else {
     return file_name;
@@ -123,8 +135,8 @@ void start_preprocess_file(const char *file_name, cpp_reader *pfile) {
   if (!file_name || !strcmp(file_name, "<command-line>")) {
     return;
   }
-  if (preprocess_start.contains(file_name) &&
-      !preprocess_end.contains(file_name)) {
+  if (preprocess_start.count(file_name) &&
+      !preprocess_end.count(file_name)) {
     // This is an edge case - this means that file_name is somewhere down the
     // stack and we have a circular include. Big fun!
     // Because we don't want to add the inner include, we replace file_name
@@ -133,7 +145,7 @@ void start_preprocess_file(const char *file_name, cpp_reader *pfile) {
     pfile = nullptr;
   }
 
-  if (!preprocess_start.contains(file_name)) {
+  if (!preprocess_start.count(file_name)) {
     preprocess_start[file_name] = now;
   }
 
@@ -143,28 +155,14 @@ void start_preprocess_file(const char *file_name, cpp_reader *pfile) {
     auto cpp_buffer = cpp_get_buffer(pfile);
     auto cpp_file = cpp_get_file(cpp_buffer);
     auto dir = cpp_get_dir(cpp_file);
-    auto real_dir_name = realpath(dir->name, nullptr);
-    auto real_file_name = realpath(file_name, nullptr);
-    if (real_dir_name && real_file_name) {
-      register_include_location(real_file_name, real_dir_name);
-    } else {
-      if (strcmp(dir->name, "")) {
-        fprintf(stderr, "Externis error! Couldn't call realpath(\"%s\")\n",
-                dir->name);
-      }
-    }
-    if (real_dir_name) {
-      free(real_dir_name);
-    }
-    if (real_file_name) {
-      free(real_file_name);
-    }
+    auto path = cpp_get_path(cpp_file);
+    register_include_location(path, dir->name);
   }
 }
 
 void end_preprocess_file() {
   auto now = ns_from_start();
-  if (!preprocess_end.contains(preprocessing_stack.top())) {
+  if (!preprocess_end.count(preprocessing_stack.top())) {
     preprocess_end[preprocessing_stack.top()] = now;
   }
   preprocessing_stack.pop();
@@ -213,15 +211,15 @@ void end_parse_function(FinishedFunction info) {
 
   TimeSpan ts{last_function_parsed_ts + 3, now};
   last_function_parsed_ts = now;
-  function_events.emplace_back(info.name, info.file_name, ts);
+  function_events.emplace_back(FunctionEvent{std::string(info.name), info.file_name, ts});
 
   if (info.scope_name) {
     if (!scope_events.empty() && did_last_function_have_scope &&
         scope_events.back().name == info.scope_name) {
       scope_events.back().ts.end = ts.end + 1;
     } else {
-      scope_events.emplace_back(info.scope_name, info.scope_type,
-                                TimeSpan{ts.start - 1, ts.end + 1});
+      scope_events.emplace_back(ScopeEvent{info.scope_name, info.scope_type,
+                                TimeSpan{ts.start - 1, ts.end + 1}});
     }
     did_last_function_have_scope = true;
   } else {
